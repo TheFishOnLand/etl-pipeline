@@ -5,7 +5,6 @@
 # Explicitly allow the specific files requested for the project
 # -----------------------------------------------------------------------------
 !.gitignore
-!cleaned.db
 !config.py
 !etl_exploration.ipynb
 !generate_data.py
