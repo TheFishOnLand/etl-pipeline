@@ -188,23 +188,19 @@ def clean_orders(
         mask = df["quantity"].notna() & df["unit_price"].notna()
         df.loc[mask, "total_amount"] = df.loc[mask, "quantity"] * df.loc[mask, "unit_price"]
 
-    # Drop rows with invalid dates or totals
-    if "order_date" in df.columns:
-        df = df[df["order_date"].notna()]
-    if "total_amount" in df.columns:
-        df = df[df["total_amount"].notna()]
+    # Keep rows with invalid dates or totals (they remain as NaT/NaN)
 
-    # Enforce referential integrity: keep only orders with valid customer_id and product_id
+    # Enforce referential integrity: keep orders but set invalid IDs to None
     valid_customer_ids = set(customers["customer_id"].astype(str))
     valid_product_ids = set(products["product_id"].astype(str))
 
     if "customer_id" in df.columns:
         df["customer_id"] = df["customer_id"].astype(str)
-        df = df[df["customer_id"].isin(valid_customer_ids)]
+        df.loc[~df["customer_id"].isin(valid_customer_ids), "customer_id"] = None
 
     if "product_id" in df.columns:
         df["product_id"] = df["product_id"].astype(str)
-        df = df[df["product_id"].isin(valid_product_ids)]
+        df.loc[~df["product_id"].isin(valid_product_ids), "product_id"] = None
 
     # Deduplicate on order_id if present
     if "order_id" in df.columns:
