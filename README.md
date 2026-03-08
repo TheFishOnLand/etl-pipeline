@@ -44,7 +44,12 @@ python pipeline.py
 This will:
 
 1. Extract data from `data/raw/*.csv` into pandas DataFrames.
-2. Transform and clean the data (deduplication, format normalisation, validation).
+2. Transform and clean the data effectively:
+   - **Phone Normalisation**: Uses `phonenumbers` and `pycountry` to validate and convert raw phone strings into E.164 formats mapped to their country codes.
+   - **Format Normalisation**: Stripes trailing spaces, enforces specific date formats (`YYYY-MM-DD`), and fixes decimal separators on financial data. 
+   - **Invalid Email Tagging**: Scans addresses and replaces invalid ones with an `INVALID_EMAIL` placeholder to preserve the rest of the customer row.
+   - **Deduplication**: Uniquely sorts duplicate IDs by their modification dates (`created_at` / `order_date`) and keeps the **latest** occurrence per ID. 
+   - **Data Preservation**: Rows with invalid dates, failing totals, or broken referential keys (`customer_id`, `product_id`) do *not* get dropped. The invalid fields are securely replaced with `NaN` / `None` so entire orders are preserved without foreign key errors.
 3. Load the cleaned data into a SQLite database file `cleaned.db` in the project root.
 
 You can inspect `cleaned.db` using any SQLite viewer or via pandas:
