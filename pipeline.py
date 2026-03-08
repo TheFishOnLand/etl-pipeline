@@ -1,12 +1,84 @@
 from __future__ import annotations
-
-from typing import Any, Tuple
+from typing import Tuple
 
 import pandas as pd
+import phonenumbers
+from phonenumbers import NumberParseException
+import pycountry
 from sqlalchemy import create_engine
 
 from config import RAW_DIR, CLEAN_DB_PATH, INVALID_EMAIL_PLACEHOLDER
 
+def _country_name_to_region(country: object) -> str | None:
+    """Best-effort mapping from country name to ISO 2-letter region code.
+    Returns None when a mapping cannot be determined; in that case, parsing
+    relies on the phone number including an explicit country code (e.g. +44...).
+    """
+    if country is None:
+        return None
+    name = str(country).strip()
+    if not name:
+        return None
+    # Normalise whitespace
+    name = " ".join(name.split())
+    original = name
+    # Handle names with extra description in parentheses, e.g. "Bouvet Island (Bouvetoya)"
+    base = name.split("(", 1)[0].strip()
+    normalized = base.replace("&", "and")
+    # First try to resolve via pycountry using a normalised name
+    try:
+        match = pycountry.countries.lookup(normalized)
+        return match.alpha_2
+    except LookupError:
+        pass
+    # Then try the full original name in case pycountry knows that variant
+    try:
+        match = pycountry.countries.lookup(name)
+        return match.alpha_2
+    except LookupError:
+        pass
+    # Fallback overrides for exotic / legacy names as they appear in our data
+    overrides = {
+        "Holy See (Vatican City State)": "VA",
+        "Lao People's Democratic Republic": "LA",
+        "Libyan Arab Jamahiriya": "LY",
+        "Svalbard & Jan Mayen Islands": "SJ",
+        "United States Minor Outlying Islands": "UM",
+        "Netherlands Antilles": "AN",
+        "Antarctica (the territory South of 60 deg S)": "AQ",
+    }
+    if original in overrides:
+        return overrides[original]
+    if normalized in overrides:
+        return overrides[normalized]
+    return None
+
+def normalize_phone_number(
+    raw_phone: object,
+    country: object,
+    *,
+    default_region: str | None = None,
+) -> str | None:
+    """Normalize a single phone number to E.164 using Google's phonenumbers.
+    - Uses the country column (best-effort) to choose a default region.
+    - Falls back to default_region when the country cannot be mapped.
+    - Returns None when the number cannot be parsed or is invalid.
+    """
+    if raw_phone is None:
+        return None
+    s = str(raw_phone).strip()
+    if not s:
+        return None
+    region = _country_name_to_region(country)
+    if region is None:
+        region = default_region
+    try:
+        parsed = phonenumbers.parse(s, region)
+    except NumberParseException:
+        return None
+    if not phonenumbers.is_valid_number(parsed):
+        return None
+    return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
 
 def extract() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     customers = pd.read_csv(RAW_DIR / "customers.csv")
@@ -23,25 +95,37 @@ def clean_customers(df: pd.DataFrame) -> pd.DataFrame:
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
 
-    # Lowercase emails
+    # Normalise phone numbers based on country information where available.
+    # Preserve the original raw phone column and write E.164 values into phone_normalized.
+    if "phone" in df.columns:
+        if "country" in df.columns:
+            df["phone_normalized"] = [
+                normalize_phone_number(phone, country)
+                for phone, country in zip(df["phone"], df["country"])
+            ]
+        else:
+            df["phone_normalized"] = [
+                normalize_phone_number(phone, None) for phone in df["phone"]
+            ]
+
+    # Lowercase emails and mark invalid ones with a placeholder
     if "email" in df.columns:
         df["email"] = df["email"].str.lower()
-
-    # Drop rows with missing or obviously invalid email
-    if "email" in df.columns:
         mask_valid_email = df["email"].str.contains("@", na=False)
-        df = df[mask_valid_email].copy()
+        df.loc[~mask_valid_email, "email"] = INVALID_EMAIL_PLACEHOLDER
 
     # Normalise created_at dates to YYYY-MM-DD
     if "created_at" in df.columns:
         df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce", dayfirst=True)
         df["created_at"] = df["created_at"].dt.strftime("%Y-%m-%d")
 
-    # Deduplicate, keeping first occurrence per customer_id
+    # Deduplicate, keeping last occurrence based on created_at per customer_id
     if "customer_id" in df.columns:
-        df = df.drop_duplicates(subset=["customer_id"])
+        if "created_at" in df.columns:
+            df = df.sort_values("created_at")
+        df = df.drop_duplicates(subset=["customer_id"], keep="last")
     else:
-        df = df.drop_duplicates()
+        df = df.drop_duplicates(keep="last")
 
     return df
 
@@ -68,9 +152,9 @@ def clean_products(df: pd.DataFrame) -> pd.DataFrame:
 
     # Deduplicate on product_id if present
     if "product_id" in df.columns:
-        df = df.drop_duplicates(subset=["product_id"])
+        df = df.drop_duplicates(subset=["product_id"], keep="last")
     else:
-        df = df.drop_duplicates()
+        df = df.drop_duplicates(keep="last")
 
     return df
 
@@ -124,9 +208,11 @@ def clean_orders(
 
     # Deduplicate on order_id if present
     if "order_id" in df.columns:
-        df = df.drop_duplicates(subset=["order_id"])
+        if "order_date" in df.columns:
+            df = df.sort_values("order_date")
+        df = df.drop_duplicates(subset=["order_id"], keep="last")
     else:
-        df = df.drop_duplicates()
+        df = df.drop_duplicates(keep="last")
 
     return df
 
@@ -139,7 +225,16 @@ def load_to_sqlite(
     engine = create_engine(f"sqlite:///{CLEAN_DB_PATH}")
 
     # Design the cleaned schema by selecting and ordering columns explicitly
-    customers_cols = ["customer_id", "first_name", "last_name", "email", "phone", "country", "created_at"]
+    customers_cols = [
+        "customer_id",
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "phone_normalized",
+        "country",
+        "created_at",
+    ]
     products_cols = ["product_id", "name", "category", "price", "currency", "in_stock"]
     orders_cols = ["order_id", "customer_id", "product_id", "order_date", "status", "quantity", "unit_price", "total_amount"]
 
