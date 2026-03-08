@@ -1,0 +1,14 @@
+# Ignore everything in the directory
+*
+
+# -----------------------------------------------------------------------------
+# Explicitly allow the specific files requested for the project
+# -----------------------------------------------------------------------------
+!.gitignore
+!cleaned.db
+!config.py
+!etl_exploration.ipynb
+!generate_data.py
+!pipeline.py
+!README.md
+!requirements.txt
